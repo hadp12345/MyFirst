@@ -1,0 +1,308 @@
+
+
+MapReduce计算框架
+	* map
+	* reduce
+
+
+shuffle过程
+	map()   --->   reduce()
+
+Input
+	<0,hadoop map hadoop reduce>
+	<24,mpareduce>
+			|
+			|
+		  map()
+map output
+	<hadoop,1> <map,1>  <hadoop,1>  
+	<reduce,1> <mapreduce,1>
+
+=================map phase shuffle====================
+>>>环形缓存区（内存）
+	* 100M
+	* 0.8（80M） spill溢写入磁盘
+>>> partition分区
+	* 绝对数据交给哪个reduce去处理
+>>> sort排序
+	* 规约合并
+>>> spill溢写入磁盘(0.8)
+	* 80M
+	* mapreduce.task.io.sort.mb
+	* mapreduce.map.sort.spill.percent
+>>> combiner(可选)
+	* 默认情况下，相当于map阶段的reduce
+	* job.setCombinerClass(WordCountReducer.class)
+>>> merge合并
+	* 把相同分区的数据合并到一起，并形成文件
+>>> compress压缩(可选)
+	* map output compress
+	* 配置
+		** conf.set("mapreduce.map.output.compress","true")   临时生效
+		** compress by configuration  永久生效
+
+=================reduce phase shuffle=================
+>>> copy map output data(merge合并)
+>>> sort排序
+>>> group分组
+	*  把相同key的value放到一起
+
+reduce input
+	<hadoop,list(1,1)>  <map,1> <reduce,1>
+			|
+			|
+		 reduce()
+reduce output		默认k,v分隔符为tab
+		|
+		|
+	hadoop	2	
+	map		1
+	reduce	1
+
+	
+	
+=======================shuffle设置======================
+1）Partition分区
+	job.setPartitionerClass(cls);
+2）Sort排序
+	job.setSortComparatorClass(cls);
+3）combiner
+	job.setCombinerClass(WordCountReducer.class);
+4）Compress压缩
+	configuration
+5）Group分组
+	job.setGroupingComparatorClass(cls);
+	
+*  job.setNumReduceTasks(tasks);
+
+=======================shuffle设置======================
+HDFS：  namenode、Secondary namenode、datanode
+YARN：  resoucemanager、nodemanager
+history：	historyserver
+
+
+
+1、集群角色分配
+
+		hadoop-senior01 	 hadoop-senior02   		hadoop-senior03       ...
+HDFS		namenode						Secondary namenode
+		datanode		datanode			datanode
+YARN					resoucemanager
+		nodemanager		nodemanager			nodemanager
+history	historyserver
+
+
+hadoop-senior01： 192.168.17.129
+hadoop-senior02:  192.168.17.130
+hadoop-senior03:  192.168.17.131   
+
+2、环境准备
+	2.1、系统和软件 [3台]
+		Centos 6.4_64  hadoop-2.5.0  jdk1.7.0_67
+	2.2、配置IP与DNS [3台]  (root)
+		* 配置静态IP
+		* DNS
+	# cat /etc/sysconfig/network-scripts/ifcfg-eth0
+		BOOTPROTO=static		--修改	
+		IPADDR=192.168.17.129	--添加下面几行
+		NETMASK=255.255.255.0
+		GATEWAY=192.168.17.2
+		DNS1=192.168.17.2
+	# service network restart
+	
+	2.3、关闭iptables和selinux   [3台]  (root)
+	# service iptables stop
+	# chkconfig iptables off
+	
+	2.4、创建普通用户和设置密码   [3台]  (root)
+	# useradd beifeng
+	# echo 123456 | passwd --stdin beifeng
+
+	2.5、配置主机名和添加映射    [3台]  (root)
+	# vi /etc/sysconfig/network		[第二台]	
+		HOSTNAME=hadoop-senior02.ibeifeng.com
+	# vi /etc/sysconfig/network		[第三台]
+		HOSTNAME=hadoop-senior03.ibeifeng.com
+
+	# vi /etc/hosts			[三台都需要添加如下内容]
+		192.168.17.129  hadoop-senior01.ibeifeng.com
+		192.168.17.130  hadoop-senior02.ibeifeng.com
+		192.168.17.131  hadoop-senior03.ibeifeng.com
+
+	2.6、卸载自带的JDK		 [3台]  (root)
+	# rpm -qa | grep java
+	# rpm -e --nodeps tzdata-java-2012j-1.el6.noarch
+	# rpm -e --nodeps java-1.6.0-openjdk-1.6.0.0-1.50.1.11.5.el6_3.x86_64
+	# rpm -e --nodeps java-1.7.0-openjdk-1.7.0.9-2.3.4.1.el6_3.x86_64
+
+	
+3、安装NTP时间同步
+	* 对集群来说，集群内部所有服务器时间保持一致是非常重要的
+	* hadoop-senior01   NTP服务  （时间服务器）
+	* hadoop-senior02 和 hadoop-senior03 去同步hadoop-senior01的时间 
+	
+	# date -R
+	Wed, 20 Jul 2016 19:39:40 +0800
+	# date 
+	2016年 07月 20日 星期三 19:40:34 CST
+	
+	==> 如果你当前服务器时区不是东八区,进行如下操作	
+	# rm -rf /etc/localtime				[3台]  (root)
+	# ln -s /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
+	
+	# service ntpd stop
+	# ntpdate cn.pool.ntp.org	--同步当前系统时间
+	
+	
+	在hadoop-senior01上面安装NTP：（必须联网）
+	# yum -y install ntp
+	# vi /etc/ntp.conf 
+	restrict 192.168.17.0 mask 255.255.255.0 nomodify notrap
+				--把前面#号去掉，并修改网段为自己的网段
+	#server 0.centos.pool.ntp.org iburst
+	#server 1.centos.pool.ntp.org iburst
+	#server 2.centos.pool.ntp.org iburst
+	#server 3.centos.pool.ntp.org iburst
+				--前面加上#号
+	server  127.127.1.0     
+	fudge   127.127.1.0 stratum 10
+				--添加如上两行配置
+	
+	# service ntpd restart
+	# chkconfig ntpd on
+
+	在hadoop-senior02/03上面同步：  [第二台][第三台]
+	# ntpdate hadoop-senior01.ibeifeng.com
+	# crontab -e
+	*/10 * * * * /usr/sbin/ntpdate hadoop-senior01.ibeifeng.com
+	# service crond restart
+
+4、配置ssh无密钥登录
+	*  scp  hadoop-senior01  --> 02、03 
+	*  sbin/start-dfs.sh   (01)
+	   sbin/start-yarn.sh  (02)
+	
+	hadoop-senior01执行以下命令：
+		$ ssh-keygen -t rsa			--生产公钥、私钥
+		$ ssh-copy-id hadoop-senior01.ibeifeng.com
+								--把公钥拷贝给其他机器
+		$ ssh-copy-id hadoop-senior02.ibeifeng.com
+		$ ssh-copy-id hadoop-senior03.ibeifeng.com
+	hadoop-senior02执行以下命令：
+		$ ssh-keygen -t rsa		
+		$ ssh-copy-id hadoop-senior01.ibeifeng.com
+		$ ssh-copy-id hadoop-senior02.ibeifeng.com
+		$ ssh-copy-id hadoop-senior03.ibeifeng.com
+	
+5、在hadoop-senior01配置
+	5.1、拷贝jdk目录到其他两个系统
+	已经配置好JDK
+	$ scp -r jdk1.7.0_67/ hadoop-senior02.ibeifeng.com:/opt/modules/
+	$ scp -r jdk1.7.0_67/ hadoop-senior03.ibeifeng.com:/opt/modules/
+	
+	5.2、配置
+	hadoop-env.sh  yarn-env.sh  mapred-env.sh (jdk)
+	
+	============core-site.xml===============
+	<property>
+        <name>fs.defaultFS</name>
+        <value>hdfs://hadoop-senior01.ibeifeng.com:8020</value>
+    </property>
+    <property>
+        <name>hadoop.tmp.dir</name>
+        <value>/opt/modules/hadoop-2.5.0/data</value>
+    </property>	
+	========================================
+	
+	============hdfs-site.xml===============
+	   <property>
+        <name>dfs.replication</name>
+        <value>3</value>
+    </property>
+	<property>
+        <name>dfs.namenode.http-address</name>
+        <value>hadoop-senior01.ibeifeng.com:50070</value>
+    </property>
+	<property>
+        <name>dfs.namenode.secondary.http-address</name>
+        <value>hadoop-senior03.ibeifeng.com:50090</value>
+    </property>	
+	<property>
+        <name>dfs.permissions.enabled</name>
+        <value>false</value>
+    </property>		
+	========================================
+	
+	===============yarn-site.xml===========
+    <property>
+        <name>yarn.nodemanager.aux-services</name>
+        <value>mapreduce_shuffle</value>
+    </property>
+	<property>
+        <name>yarn.resourcemanager.hostname</name>
+        <value>hadoop-senior02.ibeifeng.com</value>
+    </property>
+    <property>
+        <name>yarn.log-aggregation-enable</name>
+        <value>true</value>
+    </property>
+	<property>
+        <name>yarn.log-aggregation.retain-seconds</name>
+        <value>106800</value>
+    </property>	
+	==========================================
+	
+	==============mapred-site.xml=============
+    <property>
+        <name>mapreduce.framework.name</name>
+        <value>yarn</value>
+    </property>
+    <property>
+        <name>mapreduce.jobhistory.webapp.address</name>
+        <value>hadoop-senior01.ibeifeng.com:19888</value>
+    </property>
+	<property>
+        <name>mapreduce.jobhistory.address</name>
+        <value>hadoop-senior01.ibeifeng.com:10020</value>
+    </property>		
+	==========================================
+	
+	==================salves==================
+	hadoop-senior01.ibeifeng.com
+	hadoop-senior02.ibeifeng.com
+	hadoop-senior03.ibeifeng.com
+	==========================================
+	
+	5.3、拷贝hadoop目录到其他两台服务
+	$ scp -r hadoop-2.5.0/ hadoop-senior02.ibeifeng.com:/opt/modules/ 
+	$ scp -r hadoop-2.5.0/ hadoop-senior03.ibeifeng.com:/opt/modules/ 
+	
+
+	
+6、在hadoop-senior02/03配置	 
+	配置JDK    （root）
+	# mkdir /opt/softwares/
+	# mkdir /opt/modules
+	# chown -R beifeng:beifeng /opt/
+	# vi /etc/profile		--添加这两行内容
+		JAVA_HOME=/opt/modules/jdk1.7.0_67
+		export PATH=$PATH:$JAVA_HOME/bin
+		
+	## 到此最好先重启一下三台服务，再来格式化启动
+	
+7、启动服务
+	hadoop-senior01:
+		$ bin/hdfs namenode -format
+		$ sbin/start-dfs.sh
+		$ sbin/mr-jobhistory-daemon.sh start historyserver	
+	hadoop-senior02：
+		$ sbin/start-yarn.sh 
+	
+8、测试	
+	8.1、上传一个文件到hdfs
+	8.2、运行测试jar包
+	
+	
+	
+	
+	
